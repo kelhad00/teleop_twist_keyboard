@@ -3,24 +3,13 @@
 from __future__ import print_function
 
 import threading
-
+import time
 import roslib; roslib.load_manifest('teleop_twist_keyboard')
 import rospy
 
 from geometry_msgs.msg import Twist
-from geometry_msgs.msg import TwistStamped
-
-import sys
-from select import select
-
-if sys.platform == 'win32':
-    import msvcrt
-else:
-    import termios
-    import tty
-
-
-TwistMsg = Twist
+from std_msgs.msg import String
+import sys, select, termios, tty
 
 msg = """
 Reading from the keyboard  and Publishing to Twist!
@@ -78,10 +67,13 @@ speedBindings={
         'c':(1,.9),
     }
 
+vitesse=String()
+
 class PublishThread(threading.Thread):
     def __init__(self, rate):
         super(PublishThread, self).__init__()
-        self.publisher = rospy.Publisher('cmd_vel', TwistMsg, queue_size = 1)
+        self.publisher = rospy.Publisher('cmd_vel', Twist, queue_size = 1)
+
         self.x = 0.0
         self.y = 0.0
         self.z = 0.0
@@ -129,17 +121,8 @@ class PublishThread(threading.Thread):
         self.join()
 
     def run(self):
-        twist_msg = TwistMsg()
-
-        if stamped:
-            twist = twist_msg.twist
-            twist_msg.header.stamp = rospy.Time.now()
-            twist_msg.header.frame_id = twist_frame
-        else:
-            twist = twist_msg
+        twist = Twist()
         while not self.done:
-            if stamped:
-                twist_msg.header.stamp = rospy.Time.now()
             self.condition.acquire()
             # Wait for a new message or timeout.
             self.condition.wait(self.timeout)
@@ -155,7 +138,7 @@ class PublishThread(threading.Thread):
             self.condition.release()
 
             # Publish.
-            self.publisher.publish(twist_msg)
+            self.publisher.publish(twist)
 
         # Publish stop message when thread exits.
         twist.linear.x = 0
@@ -164,50 +147,41 @@ class PublishThread(threading.Thread):
         twist.angular.x = 0
         twist.angular.y = 0
         twist.angular.z = 0
-        self.publisher.publish(twist_msg)
+        self.publisher.publish(twist)
 
 
-def getKey(settings, timeout):
-    if sys.platform == 'win32':
-        # getwch() returns a string on Windows
-        key = msvcrt.getwch()
+def getKey(key_timeout):
+    tty.setraw(sys.stdin.fileno())
+    rlist, _, _ = select.select([sys.stdin], [], [], key_timeout)
+    if rlist:
+        key = sys.stdin.read(1)
     else:
-        tty.setraw(sys.stdin.fileno())
-        # sys.stdin.read() returns a string on Linux
-        rlist, _, _ = select([sys.stdin], [], [], timeout)
-        if rlist:
-            key = sys.stdin.read(1)
-        else:
-            key = ''
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+        key = ''
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
     return key
 
-def saveTerminalSettings():
-    if sys.platform == 'win32':
-        return None
-    return termios.tcgetattr(sys.stdin)
-
-def restoreTerminalSettings(old_settings):
-    if sys.platform == 'win32':
-        return
-    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
 def vels(speed, turn):
+
+    vitesse="Vitesse lineaire %s vitesse angulaire %s a ce temps "%(speed,turn)
+    t=time.time()
+    pub_vitesse.publish(vitesse+str(t))
+
     return "currently:\tspeed %s\tturn %s " % (speed,turn)
 
 if __name__=="__main__":
-    settings = saveTerminalSettings()
+    settings = termios.tcgetattr(sys.stdin)
+
+    pub_vitesse=rospy.Publisher('vitesse', String, queue_size=1)
 
     rospy.init_node('teleop_twist_keyboard')
 
     speed = rospy.get_param("~speed", 0.5)
     turn = rospy.get_param("~turn", 1.0)
     repeat = rospy.get_param("~repeat_rate", 0.0)
-    key_timeout = rospy.get_param("~key_timeout", 0.5)
-    stamped = rospy.get_param("~stamped", False)
-    twist_frame = rospy.get_param("~frame_id", '')
-    if stamped:
-        TwistMsg = TwistStamped
+    key_timeout = rospy.get_param("~key_timeout", 0.0)
+    if key_timeout == 0.0:
+        key_timeout = None
 
     pub_thread = PublishThread(repeat)
 
@@ -224,7 +198,7 @@ if __name__=="__main__":
         print(msg)
         print(vels(speed,turn))
         while(1):
-            key = getKey(settings, key_timeout)
+            key = getKey(key_timeout)
             if key in moveBindings.keys():
                 x = moveBindings[key][0]
                 y = moveBindings[key][1]
@@ -249,7 +223,7 @@ if __name__=="__main__":
                 th = 0
                 if (key == '\x03'):
                     break
-
+ 
             pub_thread.update(x, y, z, th, speed, turn)
 
     except Exception as e:
@@ -257,4 +231,5 @@ if __name__=="__main__":
 
     finally:
         pub_thread.stop()
-        restoreTerminalSettings(settings)
+
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
